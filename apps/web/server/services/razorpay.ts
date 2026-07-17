@@ -1,11 +1,26 @@
 import Razorpay from 'razorpay';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 
-const keyId = process.env.RAZORPAY_KEY_ID;
-const keySecret = process.env.RAZORPAY_KEY_SECRET;
+const keyId = process.env.RAZORPAY_KEY_ID?.trim();
+const keySecret = process.env.RAZORPAY_KEY_SECRET?.trim();
 
-export const razorpay =
-  keyId && keySecret ? new Razorpay({ key_id: keyId, key_secret: keySecret }) : null;
+/**
+ * Constructed at module scope, so a throw here takes down `next build` — not
+ * just payments. Razorpay is optional (checkout is COD-only today), so a bad
+ * or placeholder key must degrade to "not configured" rather than fail the
+ * deploy. See server/redis.ts for the same bug found the hard way.
+ */
+function makeRazorpay(): Razorpay | null {
+  if (!keyId || !keySecret) return null;
+  try {
+    return new Razorpay({ key_id: keyId, key_secret: keySecret });
+  } catch (err) {
+    console.warn('[razorpay] could not initialise, online payments DISABLED:', err);
+    return null;
+  }
+}
+
+export const razorpay = makeRazorpay();
 
 export const razorpayEnabled = !!razorpay;
 

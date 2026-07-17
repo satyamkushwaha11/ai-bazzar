@@ -6,6 +6,7 @@ import { z } from 'zod';
 import { prisma } from './db';
 import { Role } from '@repo/db';
 import { verifyPassword } from './services/password';
+import { googleAuthEnabled } from './auth-config';
 
 declare module 'next-auth' {
   interface Session {
@@ -34,10 +35,11 @@ const credentialsSchema = z.object({
  *
  * Matches how the rest of the app treats optional integrations (see
  * ai/client.ts, redis.ts, services/razorpay.ts): degrade, don't crash.
+ *
+ * The flag lives in auth-config.ts so pages can read it without importing this
+ * module — which would pull Prisma into their bundle. Single source of truth.
  */
-const googleConfigured = Boolean(process.env.AUTH_GOOGLE_ID && process.env.AUTH_GOOGLE_SECRET);
-
-export const googleAuthEnabled = googleConfigured;
+const googleConfigured = googleAuthEnabled;
 
 export const { handlers, auth, signIn, signOut } = NextAuth({
   adapter: PrismaAdapter(prisma),

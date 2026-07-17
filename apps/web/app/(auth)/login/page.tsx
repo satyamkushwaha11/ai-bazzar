@@ -1,10 +1,13 @@
 import { Suspense } from 'react';
-import { googleAuthEnabled } from '@/server/auth';
+import { googleAuthEnabled } from '@/server/auth-config';
 import { LoginForm } from './LoginForm';
 
+/**
+ * Imports auth-config, NOT server/auth: this page is prerendered, and
+ * server/auth builds NextAuth with PrismaAdapter — which would instantiate
+ * Prisma at build time just to read two env vars.
+ */
 export default function LoginPage() {
-  // Server component: whether Google is configured is an env fact, so resolve it
-  // here rather than shipping a button that may have no provider behind it.
   return (
     <Suspense>
       <LoginForm googleEnabled={googleAuthEnabled} />

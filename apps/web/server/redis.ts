@@ -1,10 +1,37 @@
 import { Redis } from '@upstash/redis';
 import { Ratelimit } from '@upstash/ratelimit';
 
-const url = process.env.UPSTASH_REDIS_REST_URL;
-const token = process.env.UPSTASH_REDIS_REST_TOKEN;
+const url = process.env.UPSTASH_REDIS_REST_URL?.trim();
+const token = process.env.UPSTASH_REDIS_REST_TOKEN?.trim();
 
-export const redis = url && token ? new Redis({ url, token }) : null;
+/**
+ * Rate limiting is optional, so this must never be able to break the app.
+ *
+ * `url && token` was not a real check: any non-empty string passed it. A
+ * placeholder value of "a" in the deploy env therefore reached `new Redis()`,
+ * which throws UrlError at MODULE SCOPE — taking down `next build` itself with
+ * "Failed to collect page data for /api/trpc/[trpc]". A misconfigured optional
+ * dependency should cost you rate limiting, not the entire deployment.
+ *
+ * So: validate the shape, and treat construction failure as "not configured".
+ */
+function makeRedis(): Redis | null {
+  if (!url || !token) return null;
+  if (!/^https:\/\/.+/i.test(url)) {
+    console.warn(
+      `[redis] UPSTASH_REDIS_REST_URL is not an https URL (got "${url}") — rate limiting is DISABLED.`,
+    );
+    return null;
+  }
+  try {
+    return new Redis({ url, token });
+  } catch (err) {
+    console.warn('[redis] could not initialise, rate limiting is DISABLED:', err);
+    return null;
+  }
+}
+
+export const redis = makeRedis();
 
 function makeLimiter(requests: number, window: `${number} ${'s' | 'm' | 'h' | 'd'}`) {
   if (!redis) return null;
