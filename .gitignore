@@ -5,6 +5,7 @@ dist
 build
 out
 coverage
+*.tsbuildinfo
 .env
 .env.local
 .env.*.local

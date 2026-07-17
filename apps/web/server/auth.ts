@@ -24,17 +24,36 @@ const credentialsSchema = z.object({
   password: z.string().min(8),
 });
 
+/**
+ * Google is only registered when it is actually configured.
+ *
+ * Auth.js validates provider config at construction, so an unconditional
+ * Google() with an undefined clientId throws and takes ALL sign-in down with it
+ * — including email/password, which needs no Google keys at all. That makes
+ * AUTH_GOOGLE_ID a hidden hard requirement for every deploy.
+ *
+ * Matches how the rest of the app treats optional integrations (see
+ * ai/client.ts, redis.ts, services/razorpay.ts): degrade, don't crash.
+ */
+const googleConfigured = Boolean(process.env.AUTH_GOOGLE_ID && process.env.AUTH_GOOGLE_SECRET);
+
+export const googleAuthEnabled = googleConfigured;
+
 export const { handlers, auth, signIn, signOut } = NextAuth({
   adapter: PrismaAdapter(prisma),
   session: { strategy: 'jwt' },
   pages: { signIn: '/login', error: '/login' },
   trustHost: true,
   providers: [
-    Google({
-      clientId: process.env.AUTH_GOOGLE_ID,
-      clientSecret: process.env.AUTH_GOOGLE_SECRET,
-      allowDangerousEmailAccountLinking: true,
-    }),
+    ...(googleConfigured
+      ? [
+          Google({
+            clientId: process.env.AUTH_GOOGLE_ID!,
+            clientSecret: process.env.AUTH_GOOGLE_SECRET!,
+            allowDangerousEmailAccountLinking: true,
+          }),
+        ]
+      : []),
     Credentials({
       name: 'Email & Password',
       credentials: {

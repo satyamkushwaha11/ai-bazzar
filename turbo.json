@@ -1,9 +1,32 @@
 {
   "$schema": "https://turbo.build/schema.json",
   "globalDependencies": ["**/.env"],
+  "//": "Turborepo runs tasks in a scrubbed environment: any variable NOT listed here is stripped, even when it is set correctly in the Vercel project. That is silent — the build just sees undefined. Anything the app reads at build or runtime must be declared.",
+  "globalEnv": ["NODE_ENV", "VERCEL", "VERCEL_ENV", "VERCEL_URL", "PORT"],
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
+      "env": [
+        "DATABASE_URL",
+        "DIRECT_URL",
+
+        "AUTH_SECRET",
+        "AUTH_URL",
+        "AUTH_GOOGLE_ID",
+        "AUTH_GOOGLE_SECRET",
+
+        "OPENAI_API_KEY",
+        "OPENAI_MODEL",
+
+        "UPSTASH_REDIS_REST_URL",
+        "UPSTASH_REDIS_REST_TOKEN",
+
+        "RAZORPAY_KEY_ID",
+        "RAZORPAY_KEY_SECRET",
+        "RAZORPAY_WEBHOOK_SECRET",
+
+        "NEXT_PUBLIC_*"
+      ],
       "outputs": [".next/**", "!.next/cache/**", "dist/**"]
     },
     "dev": {
@@ -18,7 +41,20 @@
       "dependsOn": ["^build"]
     },
     "generate": {
-      "cache": false
+      "cache": false,
+      "env": ["DATABASE_URL", "DIRECT_URL"]
+    },
+    "embed": {
+      "cache": false,
+      "env": ["DATABASE_URL", "DIRECT_URL", "OPENAI_API_KEY", "EMBED_CONCURRENCY", "FORCE"]
+    },
+    "seed": {
+      "cache": false,
+      "env": ["DATABASE_URL", "DIRECT_URL"]
+    },
+    "seed:catalog": {
+      "cache": false,
+      "env": ["DATABASE_URL", "DIRECT_URL", "CATALOG_COUNT"]
     }
   }
 }
