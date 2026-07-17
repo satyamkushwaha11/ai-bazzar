@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!--
+    Matches the Logo mark: the black rounded square with "AI".
+    Served by Next's file convention at app/icon.svg — no <link> needed.
+    currentColor is avoided deliberately: favicons render outside the page, so
+    the theme variables are not available here.
+  -->
+  <rect width="32" height="32" rx="7" fill="#0a0a0a" />
+  <text
+    x="16"
+    y="17"
+    font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif"
+    font-size="15"
+    font-weight="700"
+    letter-spacing="-0.5"
+    fill="#ffffff"
+    text-anchor="middle"
+    dominant-baseline="central"
+  >AI</text>
+</svg>

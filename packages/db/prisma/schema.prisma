@@ -1,0 +1,607 @@
+// AI Multi-Vendor Ecommerce — Prisma schema
+// `minPrice` on ProductVariant is the seller's private floor used by the
+// negotiation engine. It must NEVER be exposed to buyer-facing API responses.
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["fullTextSearchPostgres", "postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  directUrl  = env("DIRECT_URL")
+  extensions = [vector]
+}
+
+// ============ Auth ============
+
+enum Role {
+  BUYER
+  SELLER
+  ADMIN
+}
+
+model User {
+  id              String    @id @default(cuid())
+  email           String    @unique
+  emailVerified   DateTime?
+  name            String?
+  image           String?
+  phone           String?
+  passwordHash    String?
+  role            Role      @default(BUYER)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  accounts        Account[]
+  sessions        Session[]
+  seller          Seller?
+  addresses       Address[]
+  carts           Cart[]
+  orders          Order[]
+  reviews         Review[]
+  wishlistItems   Wishlist[]
+  notifications   Notification[]
+  negotiations    NegotiationSession[]
+  basketHaggles   BasketNegotiation[]
+  lockedOffers    LockedOffer[]
+  auditLogs       AuditLog[]
+
+  @@index([role])
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// ============ Seller / Store ============
+
+enum SellerStatus {
+  PENDING
+  APPROVED
+  SUSPENDED
+  REJECTED
+}
+
+model Seller {
+  id                String       @id @default(cuid())
+  userId            String       @unique
+  storeName         String
+  slug              String       @unique
+  bio               String?
+  logoUrl           String?
+  bannerUrl         String?
+  status            SellerStatus @default(PENDING)
+  // KYC
+  legalName         String?
+  gstin             String?
+  pan               String?
+  // Razorpay Route account for payouts
+  payoutAccountId   String?
+  // Negotiation policy defaults (sellers can override per product)
+  negotiationEnabled  Boolean @default(true)
+  negotiationAggressiveness Float @default(0.5)   // 0=hold firm, 1=concede fast
+  negotiationMaxTurns Int    @default(4)
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  products Product[]
+  payouts  Payout[]
+
+  @@index([status])
+}
+
+// ============ Catalog ============
+
+model Category {
+  id        String     @id @default(cuid())
+  name      String
+  slug      String     @unique
+  parentId  String?
+  parent    Category?  @relation("CategoryChildren", fields: [parentId], references: [id])
+  children  Category[] @relation("CategoryChildren")
+  imageUrl  String?
+  position  Int        @default(0)
+  createdAt DateTime   @default(now())
+
+  products Product[]
+
+  @@index([parentId])
+}
+
+enum ProductStatus {
+  DRAFT
+  ACTIVE
+  ARCHIVED
+}
+
+model Product {
+  id          String        @id @default(cuid())
+  sellerId    String
+  categoryId  String?
+  title       String
+  slug        String        @unique
+  description String        @db.Text
+  brand       String?
+  status      ProductStatus @default(DRAFT)
+  attrs       Json          @default("{}")
+  // Denormalized for fast listing
+  minListPrice Decimal?     @db.Decimal(10, 2)
+  rating       Float        @default(0)
+  reviewCount  Int          @default(0)
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+
+  // ---- Seller's negotiation rules for THIS product ----
+  // All null = inherit the seller's defaults. Resolved into a single effective
+  // floor by server/ai/rules.ts, which is what the engine is actually bounded
+  // by — so a seller cannot be haggled below their own terms.
+  /// Override Seller.negotiationEnabled for this product.
+  negotiationEnabled        Boolean?
+  /// Never discount more than this % off listPrice, whatever else allows.
+  maxDiscountPct            Float?
+  /// Never sell below costPrice * (1 + minMarginPct/100). The anti-loss rule:
+  /// it binds even when minPrice was set too low by mistake.
+  minMarginPct              Float?
+  /// Per-product concession pace / patience. Null = seller default.
+  negotiationAggressiveness Float?
+  negotiationMaxTurns       Int?
+  /// Minimum units before volume pricing unlocks. Null = seller default tiers.
+  volumeMinQty              Int?
+  /// A cheap add-on the shopkeeper may include instead of cutting price.
+  freebie                   String?
+
+  /// text-embedding-3-small truncated to 512d, over title/brand/category/attrs/
+  /// description. 512 rather than the full 1536 because writes are network-bound
+  /// and this is a Matryoshka model — see services/embeddings.ts for the detail.
+  /// Prisma has no native vector type, so reads/writes go through $queryRaw.
+  /// Null until the backfill has run; retrieval falls back to keyword search.
+  embedding    Unsupported("vector(512)")?
+  /// Hash of the embedded text, so re-embedding only fires on real changes.
+  embedHash    String?
+
+  seller   Seller          @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+  category Category?       @relation(fields: [categoryId], references: [id])
+  variants ProductVariant[]
+  images   ProductImage[]
+  reviews  Review[]
+  wishlistedBy Wishlist[]
+
+  @@index([sellerId])
+  @@index([categoryId])
+  @@index([status])
+  @@index([slug])
+}
+
+model ProductVariant {
+  id        String   @id @default(cuid())
+  productId String
+  sku       String   @unique
+  attrs     Json     @default("{}") // {size:"M", color:"red"}
+  stock     Int      @default(0)
+  listPrice Decimal  @db.Decimal(10, 2)
+  /// PRIVATE — the seller's hard floor. Never selected by buyer-facing queries.
+  minPrice  Decimal  @db.Decimal(10, 2)
+  /// PRIVATE — what this unit costs the seller. Combined with
+  /// Product.minMarginPct it produces a profit floor, so a seller cannot be
+  /// haggled into a loss even if they set minPrice carelessly.
+  /// Null = unknown cost, in which case minPrice is the only floor.
+  costPrice Decimal? @db.Decimal(10, 2)
+  imageUrl  String?
+  weightGm  Int?
+
+  product       Product         @relation(fields: [productId], references: [id], onDelete: Cascade)
+  cartItems     CartItem[]
+  orderItems    OrderItem[]
+  negotiations  NegotiationSession[]
+  lockedOffers  LockedOffer[]
+
+  @@index([productId])
+}
+
+model ProductImage {
+  id        String  @id @default(cuid())
+  productId String
+  url       String
+  alt       String?
+  position  Int     @default(0)
+
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@index([productId])
+}
+
+model Review {
+  id               String   @id @default(cuid())
+  productId        String
+  userId           String
+  rating           Int      // 1..5
+  title            String?
+  body             String?  @db.Text
+  verifiedPurchase Boolean  @default(false)
+  createdAt        DateTime @default(now())
+
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([productId, userId])
+  @@index([productId])
+}
+
+model Wishlist {
+  userId    String
+  productId String
+  createdAt DateTime @default(now())
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@id([userId, productId])
+}
+
+// ============ Cart ============
+
+model Cart {
+  id        String   @id @default(cuid())
+  userId    String?
+  sessionId String?  @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user  User?      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  items CartItem[]
+
+  @@unique([userId])
+  @@index([sessionId])
+}
+
+model CartItem {
+  id            String  @id @default(cuid())
+  cartId        String
+  variantId     String
+  qty           Int     @default(1)
+  // If buyer negotiated, references the locked price
+  lockedOfferId String? @unique
+
+  cart        Cart         @relation(fields: [cartId], references: [id], onDelete: Cascade)
+  variant     ProductVariant @relation(fields: [variantId], references: [id])
+  lockedOffer LockedOffer? @relation(fields: [lockedOfferId], references: [id])
+
+  @@unique([cartId, variantId])
+  @@index([cartId])
+}
+
+// ============ Negotiation ============
+
+enum NegotiationStatus {
+  ACTIVE
+  ACCEPTED
+  REJECTED
+  EXPIRED
+  ABANDONED
+}
+
+/// One haggle between a buyer and the AI shopkeeper over a single variant.
+///
+/// Negotiation happens BEFORE the item enters the cart: the buyer agrees a
+/// price on the product page, the engine writes a LockedOffer, and the cart
+/// carries that offer so checkout charges what was agreed.
+///
+/// `finalPrice` is public. The seller's floor is never stored here — it is
+/// recomputed per turn from the live variant so it can neither leak nor go stale.
+model NegotiationSession {
+  id          String            @id @default(cuid())
+  userId      String
+  variantId   String
+  status      NegotiationStatus @default(ACTIVE)
+  turns       Json              @default("[]") // [{role,msg,offer,counter,action,ts}]
+  finalPrice  Decimal?          @db.Decimal(10, 2)
+  startedAt   DateTime          @default(now())
+  expiresAt   DateTime
+  closedAt    DateTime?
+
+  user     User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  variant  ProductVariant @relation(fields: [variantId], references: [id])
+  offer    LockedOffer?
+
+  @@index([userId, variantId])
+  @@index([status])
+}
+
+/// A second, optional haggle over the whole basket at checkout.
+///
+/// Complements the per-product haggle rather than replacing it. A line the
+/// buyer already negotiated enters this round at its LOCKED price, not at list
+/// — so a second round can only improve on what they already won, never undo
+/// it and never double-dip below the seller's floor.
+///
+/// `listTotal` is public. The basket's floor is NEVER stored: it is recomputed
+/// per turn from live seller rules, so it can neither leak nor go stale.
+model BasketNegotiation {
+  id         String            @id @default(cuid())
+  userId     String
+  cartId     String
+  status     NegotiationStatus @default(ACTIVE)
+  turns      Json              @default("[]") // [{role,text,offer,counter,action,ts}]
+  listTotal  Decimal           @db.Decimal(10, 2)
+  finalTotal Decimal?          @db.Decimal(10, 2)
+  startedAt  DateTime          @default(now())
+  expiresAt  DateTime
+  closedAt   DateTime?
+
+  user   User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  offers LockedOffer[]
+
+  @@index([userId, cartId])
+  @@index([status])
+}
+
+/// A price the buyer negotiated and the seller is held to, for a short window.
+///
+/// Produced by NegotiationSession (per product) or BasketNegotiation (per
+/// basket line) and attached to a CartItem, which is how `priceCart` charges
+/// the agreed price instead of list — see server/services/pricing.ts.
+model LockedOffer {
+  id              String   @id @default(cuid())
+  userId          String
+  variantId       String
+  price           Decimal  @db.Decimal(10, 2)
+  expiresAt       DateTime
+  consumed        Boolean  @default(false)
+  sourceSessionId String?  @unique
+  /// Set when this line price came from a basket haggle rather than a
+  /// per-product one. Not unique: one basket produces an offer per line.
+  basketId        String?
+  createdAt       DateTime @default(now())
+
+  user     User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  variant  ProductVariant      @relation(fields: [variantId], references: [id])
+  source   NegotiationSession? @relation(fields: [sourceSessionId], references: [id])
+  basket   BasketNegotiation?  @relation(fields: [basketId], references: [id], onDelete: Cascade)
+  cartItem CartItem?
+
+  @@index([userId, variantId])
+  @@index([basketId])
+}
+
+// ============ Address ============
+
+model Address {
+  id        String  @id @default(cuid())
+  userId    String
+  fullName  String
+  phone     String
+  line1     String
+  line2     String?
+  city      String
+  state     String
+  pincode   String
+  country   String  @default("IN")
+  isDefault Boolean @default(false)
+  createdAt DateTime @default(now())
+
+  user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  orders Order[]
+
+  @@index([userId])
+}
+
+// ============ Coupon ============
+
+enum CouponScope {
+  GLOBAL
+  SELLER
+}
+
+enum CouponType {
+  PERCENT
+  FLAT
+}
+
+model Coupon {
+  id          String      @id @default(cuid())
+  code        String      @unique
+  scope       CouponScope @default(GLOBAL)
+  sellerId    String?
+  type        CouponType  @default(PERCENT)
+  value       Decimal     @db.Decimal(10, 2)
+  minSubtotal Decimal?    @db.Decimal(10, 2)
+  maxDiscount Decimal?    @db.Decimal(10, 2)
+  usageLimit  Int?
+  usedCount   Int         @default(0)
+  startsAt    DateTime    @default(now())
+  expiresAt   DateTime?
+  active      Boolean     @default(true)
+
+  @@index([code])
+}
+
+// ============ Orders & Payments ============
+
+enum OrderStatus {
+  PENDING_PAYMENT
+  /// COD order placed. Money is not in yet, but the seller should ship — this
+  /// is distinct from PENDING_PAYMENT, which means "waiting on the gateway".
+  CONFIRMED
+  PAID
+  PARTIALLY_FULFILLED
+  FULFILLED
+  CANCELLED
+  REFUNDED
+}
+
+enum PaymentMethod {
+  /// Cash on delivery — the only method live today.
+  COD
+  /// Card / UPI / netbanking via Razorpay. Wired but not yet enabled for buyers.
+  ONLINE
+}
+
+enum OrderItemStatus {
+  PLACED
+  ACCEPTED
+  SHIPPED
+  DELIVERED
+  CANCELLED
+  RETURNED
+}
+
+model Order {
+  id          String      @id @default(cuid())
+  buyerId     String
+  addressId   String
+  status      OrderStatus @default(PENDING_PAYMENT)
+  /// How the buyer is paying. COD is the only method offered today; ONLINE is
+  /// implemented end-to-end but gated off — see server/services/payments.ts.
+  paymentMethod PaymentMethod @default(COD)
+  subtotal    Decimal     @db.Decimal(10, 2)
+  discount    Decimal     @db.Decimal(10, 2) @default(0)
+  shipping    Decimal     @db.Decimal(10, 2) @default(0)
+  tax         Decimal     @db.Decimal(10, 2) @default(0)
+  total       Decimal     @db.Decimal(10, 2)
+  couponCode  String?
+  notes       String?
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+
+  buyer    User        @relation(fields: [buyerId], references: [id])
+  address  Address     @relation(fields: [addressId], references: [id])
+  items    OrderItem[]
+  payment  Payment?
+
+  @@index([buyerId])
+  @@index([status])
+}
+
+model OrderItem {
+  id           String          @id @default(cuid())
+  orderId      String
+  sellerId     String
+  variantId    String
+  qty          Int
+  unitPrice    Decimal         @db.Decimal(10, 2)
+  status       OrderItemStatus @default(PLACED)
+  trackingId   String?
+  trackingUrl  String?
+  shippedAt    DateTime?
+  deliveredAt  DateTime?
+
+  order   Order          @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  variant ProductVariant @relation(fields: [variantId], references: [id])
+
+  @@index([orderId])
+  @@index([sellerId])
+}
+
+enum PaymentStatus {
+  CREATED
+  AUTHORIZED
+  CAPTURED
+  FAILED
+  REFUNDED
+}
+
+model Payment {
+  id                String        @id @default(cuid())
+  orderId           String        @unique
+  provider          String        @default("razorpay")
+  providerOrderId   String        @unique
+  providerPaymentId String?       @unique
+  status            PaymentStatus @default(CREATED)
+  amount            Decimal       @db.Decimal(10, 2)
+  currency          String        @default("INR")
+  rawPayload        Json?
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+}
+
+enum PayoutStatus {
+  PENDING
+  PROCESSING
+  PAID
+  FAILED
+}
+
+model Payout {
+  id          String       @id @default(cuid())
+  sellerId    String
+  amount      Decimal      @db.Decimal(10, 2)
+  status      PayoutStatus @default(PENDING)
+  periodStart DateTime
+  periodEnd   DateTime
+  createdAt   DateTime     @default(now())
+
+  seller Seller @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+
+  @@index([sellerId])
+}
+
+// ============ Notifications & Audit ============
+
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String
+  type      String
+  title     String
+  body      String?
+  url       String?
+  payload   Json?
+  readAt    DateTime?
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, readAt])
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  actorId   String?
+  action    String
+  entity    String
+  entityId  String?
+  diff      Json?
+  ip        String?
+  ua        String?
+  createdAt DateTime @default(now())
+
+  actor User? @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([entity, entityId])
+  @@index([actorId])
+}
